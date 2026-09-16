@@ -2,8 +2,10 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
 from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 
 # ---------------------------------------------------
 # 기본 설정 (탭 제목, 아이콘, 화면 제목)
@@ -54,14 +56,6 @@ feature_label = {
     "long_run_index": "롱런 지수",
 }
 
-# 원래 단위로 보여줄 때 사용할 열
-original_label = {
-    "log_first_scrn": "first_scrn",
-    "log_total_audi": "total_audi",
-    "days_in_top10_feat": "days_in_top10",
-    "long_run_index": "long_run_index",
-}
-
 # ---------------------------------------------------
 # 전체 편수 / 묶은 편수 안내
 # ---------------------------------------------------
@@ -85,18 +79,31 @@ if len(selected_features) < 2:
     st.stop()
 
 # ---------------------------------------------------
-# 표준화 + K-means (난수 고정)
+# 묶음 수 고르기
+# ---------------------------------------------------
+st.subheader("묶음 수 고르기")
+n_clusters = st.slider("묶음 수를 골라 주세요", min_value=2, max_value=7, value=3, step=1)
+
+# 묶음 기호 (최대 7개까지 지원)
+cluster_symbols_all = ["㉮", "㉯", "㉰", "㉱", "㉲", "㉳", "㉴"]
+cluster_display_order = cluster_symbols_all[:n_clusters]
+
+# ---------------------------------------------------
+# 표준화
 # ---------------------------------------------------
 X = df[selected_features].values
 scaler = StandardScaler()
 X_scaled = scaler.fit_transform(X)
 
-kmeans = KMeans(n_clusters=3, random_state=42, n_init=10)
+# ---------------------------------------------------
+# 고른 묶음 수로 K-means (난수 고정)
+# ---------------------------------------------------
+kmeans = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
 raw_labels = kmeans.fit_predict(X_scaled)
 df["cluster_raw"] = raw_labels
 
 # ---------------------------------------------------
-# 누적 관객 평균이 큰 묶음부터 ㉮, ㉯, ㉰ 부여
+# 누적 관객 평균이 큰 묶음부터 기호 부여
 # ---------------------------------------------------
 cluster_order = (
     df.groupby("cluster_raw")["total_audi"]
@@ -104,10 +111,8 @@ cluster_order = (
     .sort_values(ascending=False)
     .index.tolist()
 )
-label_map = {cluster_order[0]: "㉮", cluster_order[1]: "㉯", cluster_order[2]: "㉰"}
+label_map = {raw: cluster_display_order[i] for i, raw in enumerate(cluster_order)}
 df["cluster"] = df["cluster_raw"].map(label_map)
-
-cluster_display_order = ["㉮", "㉯", "㉰"]
 
 # ---------------------------------------------------
 # 2차원 산점도
@@ -217,3 +222,58 @@ for c in cluster_display_order:
     sub = df[df["cluster"] == c].sort_values("total_audi", ascending=False).head(5)
     st.markdown(f"**{c} 묶음**")
     st.write(", ".join(sub["movieNm"].tolist()))
+
+# ---------------------------------------------------
+# 엘보우 방법: 묶음 수 1~7에 대한 관성(inertia) 계산
+# ---------------------------------------------------
+st.subheader("묶음 수에 따른 관성(inertia) 변화")
+
+k_range = list(range(1, 8))
+inertias = []
+for k in k_range:
+    km = KMeans(n_clusters=k, random_state=42, n_init=10)
+    km.fit(X_scaled)
+    inertias.append(km.inertia_)
+
+fig_elbow = go.Figure()
+fig_elbow.add_trace(
+    go.Scatter(
+        x=k_range,
+        y=inertias,
+        mode="lines+markers",
+        name="관성",
+    )
+)
+# 현재 고른 묶음 수 위치에 세로선
+fig_elbow.add_vline(x=n_clusters, line_dash="dash", line_color="red")
+fig_elbow.update_layout(
+    title="묶음 수별 관성 변화 (엘보우 그래프)",
+    xaxis_title="묶음 수",
+    yaxis_title="관성 (거리 제곱 합)",
+    xaxis=dict(tickmode="linear", tick0=1, dtick=1),
+)
+st.plotly_chart(fig_elbow, use_container_width=True)
+
+# ---------------------------------------------------
+# 묶음 수마다 관성 값과 이전 값 대비 감소량 표
+# ---------------------------------------------------
+st.subheader("묶음 수별 관성 값과 감소량")
+
+decrease_list = [None]
+for i in range(1, len(inertias)):
+    decrease_list.append(inertias[i - 1] - inertias[i])
+
+elbow_table = pd.DataFrame(
+    {
+        "묶음 수": k_range,
+        "관성 값": inertias,
+        "이전보다 줄어든 양": decrease_list,
+    }
+)
+st.dataframe(elbow_table, use_container_width=True)
+
+# ---------------------------------------------------
+# 지금 고른 묶음 수의 실루엣 점수
+# ---------------------------------------------------
+sil_score = silhouette_score(X_scaled, raw_labels)
+st.write(f"지금 고른 묶음 수({n_clusters}개)의 실루엣 점수: {sil_score:.4f} (범위 -1~1, 1에 가까울수록 묶음이 뚜렷함)")
